@@ -22,13 +22,17 @@ class UpgradeIntegrationTest {
     @Test fun loadsV1DatabaseWithoutRewritingHistoricalRows() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         context.deleteDatabase("v1-upgrade.db")
-        val db = LedgerDb(context, "v1-upgrade.db")
+        context.getDatabasePath("v1-upgrade.db").parentFile?.mkdirs()
+        val db = android.database.sqlite.SQLiteDatabase.openOrCreateDatabase(context.getDatabasePath("v1-upgrade.db"), null)
+        db.execSQL("CREATE TABLE accounts (id TEXT PRIMARY KEY NOT NULL, payload TEXT NOT NULL)")
+        db.execSQL("CREATE TABLE journal (id TEXT PRIMARY KEY NOT NULL, payload TEXT NOT NULL)")
+        db.version = 1
         val a = Account("old", "حساب قديم")
         val e = Ledger.movement(a.id, Currency.USD, BigInteger("12345"), true, "2026-11-01", "رصيد سابق")
         val accountJson = BackupCodec.account(a).apply { remove("group"); remove("favorite") }.toString()
         val entryJson = BackupCodec.entry(e).apply { listOf("action", "dueDate", "payment", "allocation", "attachments").forEach { remove(it) } }.toString()
-        db.writableDatabase.execSQL("INSERT INTO accounts(id,payload) VALUES (?,?)", arrayOf(a.id, accountJson))
-        db.writableDatabase.execSQL("INSERT INTO journal(id,payload) VALUES (?,?)", arrayOf(e.id, entryJson))
+        db.execSQL("INSERT INTO accounts(id,payload) VALUES (?,?)", arrayOf(a.id, accountJson))
+        db.execSQL("INSERT INTO journal(id,payload) VALUES (?,?)", arrayOf(e.id, entryJson))
         db.close()
         LedgerDb(context, "v1-upgrade.db").use { upgraded ->
             assertEquals(e, upgraded.load().entries.single())
@@ -39,7 +43,7 @@ class UpgradeIntegrationTest {
     }
     @Test fun rendersMultiPageArabicStatementWithPaymentsAndIndependentCurrencies() {
         val a = Account("a", "وكالة تجريبية — بيانات للاختبار")
-        var ledger = Ledger(listOf(a))
+        var ledger = Ledger(listOf(a), currencies = Currency.entries)
         val opening = Ledger.movement("a", Currency.USD, BigInteger("10000"), true, "2026-10-01", "رصيد قبل الفترة")
         ledger = ledger.add(opening)
         repeat(20) { i -> ledger = ledger.add(Ledger.movement("a", Currency.USD, BigInteger("12500"), true, "2026-11-01", "حجز تجريبي رقم ${i + 1} — بيان عربي واضح للمراجعة", "REF-${i + 1}").copy(action = Action.OWED_TO_ME, dueDate = "2026-11-10")) }

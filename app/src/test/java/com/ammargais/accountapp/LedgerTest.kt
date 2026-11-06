@@ -8,7 +8,7 @@ import java.math.BigInteger
 class LedgerTest {
     private val a = Account(id = "a", name = "أحمد")
     private val b = Account(id = "b", name = "سارة")
-    private val base = Ledger(listOf(a, b))
+    private val base = Ledger(listOf(a, b), currencies = Currency.entries)
     private fun entry(amount: String, currency: Currency = Currency.USD, debit: Boolean = true, date: String = "2026-11-01", account: String = "a") =
         Ledger.movement(account, currency, Money.parse(amount, currency), debit, date, "تجربة")
     private fun fails(block: () -> Unit) { try { block(); fail("Expected validation failure") } catch (_: IllegalArgumentException) {} }
@@ -121,7 +121,7 @@ class LedgerTest {
     @Test fun invalidBackupDoesNotPassValidation() {
         val encoded = BackupCodec.encode(base.add(entry("100")))
         fails { BackupCodec.decode(org.json.JSONObject(encoded).put("version", 99).toString()) }
-        fails { BackupCodec.decode(encoded.replace("USD", "GBP")) }
+        fails { BackupCodec.decode(encoded.replace("\"currency\":\"USD\"", "\"currency\":\"GBP\"")) }
     }
     @Test fun csvEscapesFormulasQuotesAndIncludesOpening() {
         val ledger = base.saveAccount(a.copy(name = "=1+1")).add(entry("100", date = "2026-10-01").copy(note = "=HYPERLINK(\"x\")"))

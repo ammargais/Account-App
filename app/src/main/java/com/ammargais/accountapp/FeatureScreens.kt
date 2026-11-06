@@ -39,7 +39,7 @@ private fun attachments(text: String): List<Attachment> = JSONArray(text).let { 
     onImport: (Uri, (Attachment) -> Unit) -> Unit, onSave: (Entry) -> Unit) {
     val initial = ledger.entries.find { it.id == initialDebt }
     var id by rememberSaveable { mutableStateOf(initialAccount) }
-    var code by rememberSaveable { mutableStateOf(initial?.lines?.first()?.currency?.name ?: "AED") }
+    var code by rememberSaveable { mutableStateOf(initial?.lines?.first()?.currency?.name ?: "") }
     var amount by rememberSaveable { mutableStateOf("") }
     var actionName by rememberSaveable { mutableStateOf(if (initial == null) Action.OWED_TO_ME.name else if (initial.action.debit) Action.RECEIVED.name else Action.PAID.name) }
     var date by rememberSaveable { mutableStateOf(LocalDate.now().toString()) }
@@ -51,15 +51,23 @@ private fun attachments(text: String): List<Attachment> = JSONArray(text).let { 
     var debtMenu by remember { mutableStateOf(false) }
     var allocationId by rememberSaveable { mutableStateOf(initialDebt) }
     var otherCurrency by rememberSaveable { mutableStateOf(false) }
-    var paidCode by rememberSaveable { mutableStateOf("USD") }
+    var paidCode by rememberSaveable { mutableStateOf("") }
     var paidAmount by rememberSaveable { mutableStateOf("") }
     var attached by rememberSaveable { mutableStateOf("[]") }
     var error by rememberSaveable { mutableStateOf("") }
     var pendingDuplicate by remember { mutableStateOf<Entry?>(null) }
-    val c = Currency.valueOf(code); val action = Action.valueOf(actionName)
+    val account = ledger.accounts.find { it.id == id }
+    val choices = account?.let(ledger::currenciesFor) ?: ledger.currencies
+    if (choices.isEmpty()) { Empty("أضف عملات للحساب", "من الإعدادات أضف العملات، ثم فعّلها من تعديل الحساب."); return }
+    if (initial != null && initial.lines.first().currency !in choices) {
+        Empty("فعّل عملة الدين للحساب", "فعّل ${initial.lines.first().currency.name} من تعديل الحساب، ثم ارجع لتسجيل السداد.")
+        return
+    }
+    val c = choices.find { it.name == code } ?: choices.first()
+    val paidCurrency = choices.find { it.name == paidCode } ?: choices.firstOrNull { it != c } ?: c
+    val action = Action.valueOf(actionName)
     val isPayment = action == Action.RECEIVED || action == Action.PAID
     val parsed = runCatching { Money.parse(amount, c) }
-    val account = ledger.accounts.find { it.id == id }
     val preview = parsed.getOrNull()?.let { ledger.balance(id, c) + if (action.debit) it else -it }
     val files = attachments(attached)
     val eligible = ledger.openDebts(id, date).filter { it.lines.first().currency == c && it.action.debit != action.debit }
@@ -80,7 +88,7 @@ private fun attachments(text: String): List<Attachment> = JSONArray(text).let { 
             Action.RECEIVED -> "تسجيل مبلغ استلمته من هذا الشخص؛ يقلّل ما لك أو يزيد ما له."
             else -> "تسجيل مبلغ دفعته لهذا الشخص؛ يقلّل ما عليك أو يزيد ما لك."
         }, style = MaterialTheme.typography.bodyMedium)
-        CurrencyChips(c) { code = it!!.name; allocationId = "" }
+        CurrencyChips(c, currencies = choices) { code = it!!.name; allocationId = "" }
         if (isPayment) {
             Box { OutlinedButton(onClick = { debtMenu = true }, enabled = !busy, modifier = Modifier.fillMaxWidth()) { Text(selectedDebt?.let { "سداد: ${it.note.take(35)}" } ?: "ربط بدين محدد • اختياري") }
                 DropdownMenu(debtMenu, { debtMenu = false }) {
@@ -96,10 +104,10 @@ private fun attachments(text: String): List<Attachment> = JSONArray(text).let { 
             Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(otherCurrency, { otherCurrency = it }, enabled = !busy); Text("السداد بعملة أخرى") }
             if (otherCurrency) {
                 Text("المبلغ أعلاه يُخصم من المستحق بعملته الأصلية. أدخل ما تم دفعه فعليًا هنا:")
-                CurrencyChips(Currency.valueOf(paidCode)) { paidCode = it!!.name }
-                OutlinedTextField(paidAmount, { paidAmount = it.take(30) }, Modifier.fillMaxWidth(), label = { Text("المبلغ المدفوع فعليًا • $paidCode") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), singleLine = true)
-                val paid = runCatching { Money.parse(paidAmount, Currency.valueOf(paidCode)) }.getOrNull()
-                if (paid != null && parsed.isSuccess) Info("السعر المتفق عليه: ${ltr("1 ${c.name} = ${Money.rate(parsed.getOrThrow(), c, paid, Currency.valueOf(paidCode))} $paidCode")}\nلا يُنشأ دين جديد بعملة الدفع.")
+                CurrencyChips(paidCurrency, currencies = choices) { paidCode = it!!.name }
+                OutlinedTextField(paidAmount, { paidAmount = it.take(30) }, Modifier.fillMaxWidth(), label = { Text("المبلغ المدفوع فعليًا • ${paidCurrency.name}") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), singleLine = true)
+                val paid = runCatching { Money.parse(paidAmount, paidCurrency) }.getOrNull()
+                if (paid != null && parsed.isSuccess) Info("السعر المتفق عليه: ${ltr("1 ${c.name} = ${Money.rate(parsed.getOrThrow(), c, paid, paidCurrency)} ${paidCurrency.name}")}\nلا يُنشأ دين جديد بعملة الدفع.")
             }
         }
         DateField(date, { date = it }, modifier = Modifier.fillMaxWidth())
@@ -121,8 +129,8 @@ private fun attachments(text: String): List<Attachment> = JSONArray(text).let { 
                 require(allocationId.isBlank() || selectedDebt != null) { "الدين المحدد غير متاح بهذا التاريخ؛ اختر الدين مجددًا" }
                 val units = Money.parse(amount, c)
                 val base = if (isPayment && otherCurrency) {
-                    require(paidCode != code) { "اختر عملة دفع مختلفة أو ألغ خيار السداد بعملة أخرى" }
-                    ledger.settle(id, c, units, Currency.valueOf(paidCode), Money.parse(paidAmount, Currency.valueOf(paidCode)), action == Action.RECEIVED, date,
+                    require(paidCurrency != c) { "اختر عملة دفع مختلفة أو ألغ خيار السداد بعملة أخرى" }
+                    ledger.settle(id, c, units, paidCurrency, Money.parse(paidAmount, paidCurrency), action == Action.RECEIVED, date,
                         note.ifBlank { action.title }, reference, allocationId.takeIf { it.isNotBlank() })
                 } else Ledger.movement(id, c, units, action.debit, date, note.ifBlank { if (opening) "رصيد افتتاحي" else action.title }, reference, opening && action.isDebt).copy(
                     action = action, dueDate = if (action.isDebt) due.takeIf { it.isNotBlank() } else null,
@@ -167,7 +175,7 @@ private fun attachments(text: String): List<Attachment> = JSONArray(text).let { 
     }
 }
 
-@Composable internal fun SettingsScreen(vm: AccountViewModel) {
+@Composable internal fun SettingsScreen(vm: AccountViewModel, onCurrencies: () -> Unit) {
     val context = LocalContext.current
     val activity = context as? MainActivity
     val prefs = remember { BackgroundServices.prefs(context) }
@@ -198,6 +206,7 @@ private fun attachments(text: String): List<Attachment> = JSONArray(text).let { 
         mode = ""; selectedUri = ""; password = ""; confirmation = ""
     }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        OutlinedButton(onClick = onCurrencies, modifier = Modifier.fillMaxWidth()) { Text("العملات وأسعار التحويل") }
         Section("حماية دفتر الحسابات")
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) { Text("قفل بالبصمة أو رمز الهاتف", Modifier.weight(1f)); Switch(activity?.lockEnabled == true, { enabled -> activity?.setAppLock(enabled) { error = it } }, enabled = !vm.busy) }
         Info("الحركات تُحفظ داخل الجهاز. النسخة المشفرة تحفظ الدفتر والمرفقات خارج التطبيق. احتفظ بكلمة مرور النسخ؛ ستحتاجها عند تغيير الهاتف.")
@@ -217,9 +226,9 @@ private fun attachments(text: String): List<Attachment> = JSONArray(text).let { 
         Text("تنبيه محلي عام لك؛ لا تُرسل رسائل إلى العملاء. قد يتأخر التنبيه حسب إعدادات البطارية.", style = MaterialTheme.typography.bodySmall)
         if (error.isNotBlank()) Text(error, color = Red)
         HorizontalDivider(); Section("دليل سريع")
-        Text("لي عنده: دين جديد لك. له عندي: دين جديد عليك. استلمت منه / دفعت له: تسجيل دفع فعلي.\nاربط السداد بالدين لتظهر دفعاته والمتبقي في المستحقات. لكل عملة رصيد مستقل، وUSDT منفصلة عن USD.\nللتصحيح افتح الحركة واعكسها ثم أضف الصحيحة؛ اعكس السدادات المرتبطة قبل عكس أصل الدين.")
+        Text("لي عنده: دين جديد لك. له عندي: دين جديد عليك. استلمت منه / دفعت له: تسجيل دفع فعلي.\nاربط السداد بالدين لتظهر دفعاته والمتبقي في المستحقات. لكل عملة رصيد مستقل. عملة الملخص لا تغيّر الحركات الأصلية.\nللتصحيح افتح الحركة واعكسها ثم أضف الصحيحة؛ اعكس السدادات المرتبطة قبل عكس أصل الدين.")
         OutlinedButton(onClick = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/ammargais/Account-App/releases"))) }, modifier = Modifier.fillMaxWidth()) { Text("تحميل أحدث إصدار من GitHub") }
-        Text("دفتر 0.2.0 • نسخة تجريبية\n${vm.ledger.accounts.size} حساب • ${vm.ledger.entries.size} حركة", style = MaterialTheme.typography.bodySmall)
+        Text("دفتر 0.3.0 • نسخة تجريبية\n${vm.ledger.accounts.size} حساب • ${vm.ledger.entries.size} حركة", style = MaterialTheme.typography.bodySmall)
         Text("دفتر للمستحقات، وليس تقرير أرباح أو ضرائب. السداد بعملة أخرى يوثّق المبلغ المدفوع ولا يدير رصيد صندوق.", style = MaterialTheme.typography.bodySmall)
         Spacer(Modifier.height(24.dp))
     }

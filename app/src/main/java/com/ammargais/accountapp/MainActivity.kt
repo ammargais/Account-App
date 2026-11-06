@@ -108,10 +108,13 @@ class MainActivity : FragmentActivity() {
     val snackbar = remember { SnackbarHostState() }
     val context = LocalContext.current
     val csv = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/csv")) {
-        if (it != null && exportId.isNotBlank()) vm.exportCsv(it, exportId, exportCurrency.takeIf(String::isNotBlank)?.let(Currency::valueOf), exportFrom, exportTo)
+        if (it != null && exportId.isNotBlank()) vm.exportCsv(it, exportId, exportCurrency.takeIf(String::isNotBlank)?.let(ledger::currency), exportFrom, exportTo)
+    }
+    val xlsx = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")) {
+        if (it != null && exportId.isNotBlank()) vm.exportXlsx(it, exportId, exportCurrency.takeIf(String::isNotBlank)?.let(ledger::currency), exportFrom, exportTo)
     }
     val pdf = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) {
-        if (it != null && exportId.isNotBlank()) vm.exportPdf(it, exportId, exportCurrency.takeIf(String::isNotBlank)?.let(Currency::valueOf), exportFrom, exportTo)
+        if (it != null && exportId.isNotBlank()) vm.exportPdf(it, exportId, exportCurrency.takeIf(String::isNotBlank)?.let(ledger::currency), exportFrom, exportTo)
     }
     LaunchedEffect(vm.message) { vm.message?.let { snackbar.showSnackbar(it); vm.clearMessage() } }
     LaunchedEffect(route, tab) { snackbar.currentSnackbarData?.dismiss() }
@@ -119,7 +122,7 @@ class MainActivity : FragmentActivity() {
     BackHandler(route != "home") { if (!vm.busy) goBack() }
     Scaffold(
         snackbarHost = { SnackbarHost(snackbar) },
-        topBar = { TopAppBar(title = { Column { Text(when(route) { "detail" -> account?.name ?: "الحساب"; "movement" -> "حركة جديدة"; "exchange" -> "تبديل عملة الرصيد"; else -> "دفتر" }, fontWeight = FontWeight.Bold)
+        topBar = { TopAppBar(title = { Column { Text(when(route) { "detail" -> account?.name ?: "الحساب"; "movement" -> "حركة جديدة"; "exchange" -> "تبديل عملة الرصيد"; "currencies" -> "العملات وأسعار التحويل"; else -> "دفتر" }, fontWeight = FontWeight.Bold)
             if (route == "home") Text("حساباتك، بوضوح", style = MaterialTheme.typography.labelMedium, color = Green) } },
             navigationIcon = { if (route != "home") IconButton(onClick = { goBack() }, enabled = !vm.busy) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "رجوع") } },
             colors = TopAppBarDefaults.topAppBarColors(containerColor = Soft),
@@ -129,9 +132,10 @@ class MainActivity : FragmentActivity() {
                 icon = { Icon(listOf(Icons.Default.Home, Icons.Default.List, Icons.Default.DateRange, Icons.Default.Settings)[i], null) }, label = { Text(title) }) }
         } },
         floatingActionButton = { if (vm.ready && (route == "home" && tab < 2 && (tab == 1 || ledger.accounts.any { !it.archived }) || route == "detail" && account?.archived == false)) {
-            val actionLabel = if (ledger.accounts.none { !it.archived } || route == "home" && tab == 1) "حساب جديد" else "حركة جديدة"
+            val actionLabel = if (ledger.currencies.isEmpty()) "إضافة عملة" else if (ledger.accounts.none { !it.archived } || route == "home" && tab == 1) "حساب جديد" else "حركة جديدة"
             ExtendedFloatingActionButton(onClick = {
-                if (ledger.accounts.none { !it.archived } || route == "home" && tab == 1) { editingId = ""; showAccount = true }
+                if (ledger.currencies.isEmpty()) { route = "currencies" }
+                else if (ledger.accounts.none { !it.archived } || route == "home" && tab == 1) { editingId = ""; showAccount = true }
                 else { if (route == "home") accountId = ""; debtId = ""; route = "movement" }
             }, modifier = Modifier.semantics { contentDescription = actionLabel }, icon = { Icon(Icons.Default.Add, null) }, text = { Text(actionLabel) }, containerColor = Green, contentColor = Color.White)
         } }
@@ -140,6 +144,7 @@ class MainActivity : FragmentActivity() {
             if (!vm.ready) Column(Modifier.align(Alignment.Center).padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                 if (vm.busy) CircularProgressIndicator() else { Text("تعذر فتح البيانات؛ بياناتك لم تُحذف"); Button(onClick = { vm.reload() }) { Text("إعادة المحاولة") } }
             } else when (route) {
+                "currencies" -> CurrencySettingsScreen(vm)
                 "movement" -> MovementForm(ledger, accountId, debtId, vm.busy, vm::importAttachment, onSave = { e -> vm.mutate({ accountId = e.lines.first().accountId; route = "detail" }) { it.add(e) } })
                 "exchange" -> if (account != null) ExchangeForm(ledger, account, vm.busy) { e ->
                     vm.mutate({ route = "detail" }) { current ->
@@ -153,22 +158,23 @@ class MainActivity : FragmentActivity() {
                         if (share) vm.exportPdf(null, account.id, c, from, to)
                         else { exportId = account.id; exportCurrency = c?.name ?: ""; exportFrom = from; exportTo = to; pdf.launch("Daftar_Statement_${LocalDate.now()}.pdf") }
                     }, onAttachment = vm::openAttachment,
+                    onXlsx = { c, from, to -> exportId = account.id; exportCurrency = c?.name ?: ""; exportFrom = from; exportTo = to; xlsx.launch("Daftar_Statement_${LocalDate.now()}.xlsx") },
                     onExchange = { route = "exchange" }, onReverse = { e, reason -> vm.mutate { it.reverse(e, reason) } },
                     onExport = { c, from, to -> exportId = account.id; exportCurrency = c?.name ?: ""; exportFrom = from; exportTo = to; csv.launch("Daftar_Statement_${LocalDate.now()}.csv") },
                     onShare = { through ->
                         context.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply { type = "text/plain"; putExtra(Intent.EXTRA_TEXT, Statement.summary(ledger, account, through)) }, "مشاركة ملخص الحساب"))
                     })
                 else -> when (tab) {
-                    0 -> Dashboard(ledger, onOpen = { accountId = it; route = "detail" }, onAdd = { editingId = ""; showAccount = true })
+                    0 -> Dashboard(ledger, onCurrencies = { route = "currencies" }, onOpen = { accountId = it; route = "detail" }, onAdd = { editingId = ""; showAccount = true })
                     1 -> AccountList(ledger) { accountId = it; route = "detail" }
                     2 -> DueScreen(ledger) { debt -> accountId = debt.lines.first().accountId; debtId = debt.id; route = "movement" }
-                    else -> SettingsScreen(vm)
+                    else -> SettingsScreen(vm, onCurrencies = { route = "currencies" })
                 }
             }
             if (vm.busy && vm.ready) LinearProgressIndicator(Modifier.fillMaxWidth().align(Alignment.TopCenter))
         }
     }
-    if (showAccount) AccountDialog(ledger.accounts.find { it.id == editingId }, vm.busy, onDismiss = { showAccount = false }) { a -> vm.mutate({ showAccount = false }) { it.saveAccount(a) } }
+    if (showAccount) AccountDialog(ledger, ledger.accounts.find { it.id == editingId }, vm.busy, onDismiss = { showAccount = false }) { a -> vm.mutate({ showAccount = false }) { it.saveAccount(a) } }
     vm.pendingRestore?.let { incoming -> AlertDialog(onDismissRequest = { if (!vm.busy) vm.dismissRestore() }, title = { Text("استعادة النسخة الاحتياطية") },
         text = { Text("الملف يحتوي ${incoming.accounts.size} حسابًا و${incoming.entries.size} حركة. ستُضاف البيانات الجديدة فقط؛ الحركات الموجودة لن تتكرر، وأسماء حساباتك الحالية ستبقى كما هي.") },
         confirmButton = { TextButton(onClick = { vm.restore() }, enabled = !vm.busy) { Text("استعادة ودمج") } },
@@ -179,10 +185,10 @@ class MainActivity : FragmentActivity() {
     Text(text, modifier, color = color, fontWeight = FontWeight.Bold, fontSize = if (large) 28.sp else 17.sp,
         style = MaterialTheme.typography.bodyLarge.copy(textDirection = TextDirection.Ltr))
 }
-@Composable internal fun CurrencyChips(selected: Currency?, allowAll: Boolean = false, select: (Currency?) -> Unit) {
+@Composable internal fun CurrencyChips(selected: Currency?, allowAll: Boolean = false, currencies: List<Currency>, select: (Currency?) -> Unit) {
     FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         if (allowAll) FilterChip(selected = selected == null, onClick = { select(null) }, label = { Text("الكل") })
-        Currency.entries.forEach { c -> FilterChip(selected = selected == c, onClick = { select(c) }, label = { Text(c.name) }) }
+        currencies.forEach { c -> FilterChip(selected = selected == c, onClick = { select(c) }, label = { Text(c.name) }) }
     }
 }
 @Composable internal fun Info(text: String) {
@@ -199,36 +205,21 @@ class MainActivity : FragmentActivity() {
     }
 }
 
-@Composable private fun Dashboard(ledger: Ledger, onOpen: (String) -> Unit, onAdd: () -> Unit) {
-    var code by rememberSaveable { mutableStateOf("AED") }
-    val c = Currency.valueOf(code)
-    val totals = remember(ledger, c) { ledger.totals(c) }
-    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp, 8.dp, 20.dp, 110.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
-        item { CurrencyChips(c) { code = it!!.name } }
-        item {
-            Surface(color = Green, shape = RoundedCornerShape(26.dp)) {
-                Column(Modifier.fillMaxWidth().padding(24.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                    Text("نظرة على ${c.title}", color = Color(0xFFD5EBE5))
-                    Text("المستحق لنا", color = Color.White)
-                    NumberText("${Money.format(totals.first, c)}  ${c.name}", color = Color.White, large = true)
-                    HorizontalDivider(color = Color.White.copy(alpha = .2f))
-                    Text("المستحق علينا", color = Color(0xFFD5EBE5))
-                    NumberText("${Money.format(totals.second, c)}  ${c.name}", color = Color.White)
-                }
-            }
-        }
-        item { Text("${ledger.accounts.count { !it.archived }} حساب نشط  •  كل عملة لها رصيد مستقل", style = MaterialTheme.typography.bodyMedium) }
-        if (ledger.accounts.isEmpty()) item {
-            Empty("ابدأ بحساب واحد", "أضف شخصًا أو جهة تتعامل معها.")
+@Composable private fun Dashboard(ledger: Ledger, onCurrencies: () -> Unit, onOpen: (String) -> Unit, onAdd: () -> Unit) {
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp, 8.dp, 20.dp, 110.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        item { Section("ملخص الحسابات") }
+        item { ConvertedSummaryCard(ledger, ledger.settings.summaryCurrency, onConfigure = onCurrencies) }
+        item { OutlinedButton(onClick = onCurrencies, modifier = Modifier.fillMaxWidth()) { Text("إدارة العملات وأسعار التحويل") } }
+        if (ledger.currencies.isEmpty()) item {
+            Empty("أضف عملاتك أولًا", "اكتب العملات التي تتعامل بها، ثم أنشئ حساباتك.")
+            Button(onClick = onCurrencies, modifier = Modifier.fillMaxWidth()) { Text("إضافة أول عملة") }
+        } else if (ledger.accounts.isEmpty()) item {
+            Empty("ابدأ بحساب واحد", "حدد العملات التي تتعامل بها مع الشخص أو الجهة.")
             Button(onClick = onAdd, modifier = Modifier.fillMaxWidth()) { Text("إضافة أول حساب") }
-            Spacer(Modifier.height(14.dp))
-            Info("مثال: لك عند أحمد 100 دولار؟ سجّل حركة مدين. استلمت منه 40؟ سجّل حركة دائن. المتبقي لك 60 دولارًا.")
         } else {
             item { Section("آخر الحركات") }
-            val recent = ledger.entries.sortedWith(compareByDescending<Entry> { it.date }.thenByDescending { it.createdAt }).filter { e -> e.lines.any { it.currency == c } }.take(8)
-            if (recent.isEmpty()) item { Empty("لا توجد حركات بهذه العملة", "اختر عملة أخرى أو أضف حركة جديدة.") }
-            items(recent, key = { it.id }) { e ->
-                val line = e.lines.first { it.accountId != Ledger.CONTROL && it.currency == c }
+            items(ledger.entries.sortedWith(compareByDescending<Entry> { it.date }.thenByDescending { it.createdAt }).take(8), key = { it.id }) { e ->
+                val line = e.lines.first { it.accountId != Ledger.CONTROL }; val c = line.currency
                 val name = ledger.accounts.first { it.id == line.accountId }.name
                 Surface(onClick = { onOpen(line.accountId) }, shape = RoundedCornerShape(18.dp), color = Color.White) {
                     Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -258,7 +249,7 @@ class MainActivity : FragmentActivity() {
         items(filtered, key = { it.id }) { a -> Surface(onClick = { onOpen(a.id) }, shape = RoundedCornerShape(18.dp)) {
             Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text((if (a.favorite) "★ " else "") + a.name + " • " + a.group.title, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
-                val balances = Currency.entries.map { it to ledger.balance(a.id, it) }.filter { it.second != BigInteger.ZERO }
+                val balances = ledger.currencies.map { it to ledger.balance(a.id, it) }.filter { it.second != BigInteger.ZERO }
                 if (balances.isEmpty()) Text("لا يوجد رصيد مستحق", color = Green)
                 balances.forEach { (c, b) -> Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     Text(Statement.side(b), color = if (b.signum() > 0) Green else Red)
@@ -270,7 +261,7 @@ class MainActivity : FragmentActivity() {
 }
 
 @Composable private fun AccountDetail(ledger: Ledger, account: Account, busy: Boolean, onExchange: () -> Unit, onReverse: (Entry, String) -> Unit,
-    onExport: (Currency?, String, String) -> Unit, onShare: (String) -> Unit, onPdf: (Currency?, String, String, Boolean) -> Unit, onAttachment: (Attachment) -> Unit) {
+    onXlsx: (Currency?, String, String) -> Unit, onExport: (Currency?, String, String) -> Unit, onShare: (String) -> Unit, onPdf: (Currency?, String, String, Boolean) -> Unit, onAttachment: (Attachment) -> Unit) {
     var currency by rememberSaveable(account.id) { mutableStateOf("") }
     var search by rememberSaveable(account.id) { mutableStateOf("") }
     var from by rememberSaveable(account.id) { mutableStateOf("") }
@@ -278,17 +269,18 @@ class MainActivity : FragmentActivity() {
     var filters by rememberSaveable(account.id) { mutableStateOf(false) }
     var selectedId by rememberSaveable { mutableStateOf("") }
     var reverseReason by rememberSaveable { mutableStateOf("") }
-    val selectedCurrency = currency.takeIf(String::isNotBlank)?.let(Currency::valueOf)
+    val selectedCurrency = currency.takeIf(String::isNotBlank)?.let(ledger::currency)
     val start = from.ifEmpty { "0001-01-01" }; val end = to.ifEmpty { "9999-12-31" }
     val validRange = start <= end
-    val rows = remember(ledger, account.id, selectedCurrency, start, end, search) { if (!validRange) emptyList() else ledger.rows(account.id, selectedCurrency, start, end).filter { it.entry.note.contains(search, true) || it.entry.reference.contains(search, true) }.reversed() }
+    val rows = remember(ledger, account.id, selectedCurrency, start, end, search) { if (!validRange) emptyList() else ledger.rows(account.id, selectedCurrency, start, end).filter { it.entry.note.contains(search, true) || it.entry.reference.contains(search, true) || it.entry.date.contains(search) || Money.plain(it.line.units.abs(), it.line.currency).contains(search.replace(",", "")) }.reversed() }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp, 8.dp, 20.dp, 110.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        item { ConvertedSummaryCard(ledger, account.summaryCurrency, account.id, end) }
         if (account.archived) item { Info("الحساب مؤرشف. يمكن مشاهدة الكشف أو إعادة تنشيطه من تعديل.") }
-        item { CurrencyChips(selectedCurrency, true) { currency = it?.name ?: "" } }
+        item { CurrencyChips(selectedCurrency, true, ledger.currencies) { currency = it?.name ?: "" } }
         item { Surface(shape = RoundedCornerShape(20.dp)) {
             Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Section(if (to.isBlank()) "الرصيد الحالي" else "الرصيد حتى $to")
-                (selectedCurrency?.let { listOf(it) } ?: Currency.entries).forEach { c -> val b = ledger.balance(account.id, c, end)
+                (selectedCurrency?.let { listOf(it) } ?: ledger.currencies).forEach { c -> val b = ledger.balance(account.id, c, end)
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                         Text(Statement.side(b), color = if (b.signum() < 0) Red else Green)
                         NumberText("${Money.format(b.abs(), c)} ${c.name}")
@@ -304,12 +296,13 @@ class MainActivity : FragmentActivity() {
             OutlinedButton(onClick = { onPdf(selectedCurrency, start, end, false) }, enabled = validRange && !busy, modifier = Modifier.weight(1f)) { Text("حفظ PDF") }
             OutlinedButton(onClick = { onPdf(selectedCurrency, start, end, true) }, enabled = validRange && !busy, modifier = Modifier.weight(1f)) { Text("مشاركة PDF") }
         } }
+        item { OutlinedButton(onClick = { onXlsx(selectedCurrency, start, end) }, enabled = validRange && !busy, modifier = Modifier.fillMaxWidth()) { Text("حفظ Excel") } }
         if (!account.archived) item { TextButton(onClick = onExchange, enabled = !busy) { Text("تبديل عملة مبلغ مستحق") } }
         item { Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) { Section("كشف الحركات"); TextButton(onClick = { filters = !filters }) { Text(if (filters) "إخفاء التصفية" else "بحث وتصفية") } } }
         if (filters) {
-            item { OutlinedTextField(search, { search = it }, Modifier.fillMaxWidth(), label = { Text("ابحث في البيان أو المرجع") }, singleLine = true) }
+            item { OutlinedTextField(search, { search = it }, Modifier.fillMaxWidth(), label = { Text("ابحث بالبيان أو المرجع أو المبلغ أو التاريخ") }, singleLine = true) }
             item { Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { DateField(from, { from = it }, "من تاريخ", Modifier.weight(1f)); DateField(to, { to = it }, "إلى تاريخ", Modifier.weight(1f)) } }
-            item { TextButton(onClick = { from = ""; to = ""; search = "" }) { Text("مسح التصفية") }; Text("ملفات PDF وCSV تشمل الفترة والعملة المختارتين؛ البحث النصي يخص العرض هنا.", style = MaterialTheme.typography.bodySmall) }
+            item { TextButton(onClick = { from = ""; to = ""; search = "" }) { Text("مسح التصفية") }; Text("ملفات PDF وExcel وCSV تشمل الفترة والعملة المختارتين؛ البحث النصي يخص العرض هنا.", style = MaterialTheme.typography.bodySmall) }
         }
         if (!validRange) item { Text("تاريخ البداية بعد تاريخ النهاية", color = Red) }
         if (rows.isEmpty() && validRange) item { Empty("لا توجد حركات", "أضف حركة أو غيّر خيارات التصفية.") }
@@ -360,7 +353,9 @@ class MainActivity : FragmentActivity() {
     }, modifier = modifier.heightIn(min = 52.dp)) { Text("$label: ${if (value.isEmpty()) "الكل" else ltr(value)}") }
 }
 
-@Composable private fun AccountDialog(existing: Account?, busy: Boolean, onDismiss: () -> Unit, onSave: (Account) -> Unit) {
+@Composable private fun AccountDialog(ledger: Ledger, existing: Account?, busy: Boolean, onDismiss: () -> Unit, onSave: (Account) -> Unit) {
+    var selectedCodes by rememberSaveable(existing?.id) { mutableStateOf(existing?.currencyCodes ?: if (existing != null) ledger.currencies.map { it.name } else emptyList()) }
+    var summary by rememberSaveable(existing?.id) { mutableStateOf(existing?.summaryCurrency ?: "") }
     var name by rememberSaveable(existing?.id) { mutableStateOf(existing?.name ?: "") }
     var phone by rememberSaveable(existing?.id) { mutableStateOf(existing?.phone ?: "") }
     var group by rememberSaveable(existing?.id) { mutableStateOf(existing?.group?.name ?: "PERSON") }
@@ -374,11 +369,17 @@ class MainActivity : FragmentActivity() {
             Box { OutlinedButton(onClick = { groupMenu = true }) { Text("التصنيف: ${AccountGroup.valueOf(group).title}") }
                 DropdownMenu(groupMenu, { groupMenu = false }) { AccountGroup.entries.forEach { g -> DropdownMenuItem(text = { Text(g.title) }, onClick = { group = g.name; groupMenu = false }) } }
             }
+            Section("عملات التعامل")
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) { ledger.currencies.forEach { c ->
+                FilterChip(c.name in selectedCodes, { selectedCodes = if (c.name in selectedCodes) selectedCodes - c.name else selectedCodes + c.name }, label = { Text(c.name) })
+            } }
+            Text("اختر عملة واحدة على الأقل. تغيير العملات لا يحذف الحركات السابقة.", style = MaterialTheme.typography.bodySmall)
+            CurrencyDropdown("عملة ملخص الحساب", ledger.currencies, summary) { summary = it }
             Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(favorite, { favorite = it }); Text("تثبيت ضمن الحسابات المفضلة") }
             if (existing != null) Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(archived, { archived = it }); Text("أرشفة الحساب وإيقاف الحركات الجديدة") }
             Text("يمكن تسجيل الأرصدة الافتتاحية بعد إنشاء الحساب من حركة جديدة.", style = MaterialTheme.typography.bodySmall)
         }
-    }, confirmButton = { TextButton(onClick = { onSave((existing ?: Account(name = name)).copy(name = name, phone = phone, archived = archived, group = AccountGroup.valueOf(group), favorite = favorite)) }, enabled = name.isNotBlank() && !busy) { Text("حفظ الحساب") } },
+    }, confirmButton = { TextButton(onClick = { onSave((existing ?: Account(name = name)).copy(name = name, phone = phone, archived = archived, group = AccountGroup.valueOf(group), favorite = favorite, currencyCodes = selectedCodes, summaryCurrency = summary.takeIf { it.isNotBlank() })) }, enabled = name.isNotBlank() && selectedCodes.isNotEmpty() && !busy) { Text("حفظ الحساب") } },
         dismissButton = { TextButton(onClick = onDismiss, enabled = !busy) { Text("إلغاء") } })
 }
 
@@ -390,11 +391,13 @@ class MainActivity : FragmentActivity() {
 }
 
 @Composable private fun ExchangeForm(ledger: Ledger, account: Account, busy: Boolean, onSave: (Entry) -> Unit) {
-    var from by rememberSaveable { mutableStateOf("USD") }; var to by rememberSaveable { mutableStateOf("SDG") }
+    var from by rememberSaveable { mutableStateOf("") }; var to by rememberSaveable { mutableStateOf("") }
     var first by rememberSaveable { mutableStateOf("") }; var second by rememberSaveable { mutableStateOf("") }
     var receivable by rememberSaveable { mutableStateOf(true) }; var date by rememberSaveable { mutableStateOf(LocalDate.now().toString()) }
     var note by rememberSaveable { mutableStateOf("") }; var error by rememberSaveable { mutableStateOf("") }
-    val fc = Currency.valueOf(from); val tc = Currency.valueOf(to)
+    val choices = ledger.currenciesFor(account)
+    if (choices.size < 2) { Empty("أضف عملتين للحساب", "فعّل العملات من تعديل الحساب قبل تبديل الرصيد."); return }
+    val fc = choices.find { it.name == from } ?: choices.first(); val tc = choices.find { it.name == to } ?: choices[1]
     val fm = runCatching { Money.parse(first, fc) }.getOrNull(); val tm = runCatching { Money.parse(second, tc) }.getOrNull()
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).imePadding().padding(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Info("تغيير عملة مبلغ مستحق في حساب ${account.name} بسعر تتفقان عليه. أدخل المبلغين الفعليين؛ هذه العملية لا تسجّل سدادًا نقديًا.")
@@ -402,13 +405,13 @@ class MainActivity : FragmentActivity() {
             FilterChip(receivable, { receivable = true }, label = { Text("تبديل مبلغ لنا") }); FilterChip(!receivable, { receivable = false }, label = { Text("تبديل مبلغ علينا") })
         }
         Section("المبلغ الذي سيُخصم من الرصيد الأصلي")
-        CurrencyChips(fc) { from = it!!.name }
-        OutlinedTextField(first, { first = it.take(30) }, Modifier.fillMaxWidth(), label = { Text("المبلغ الأصلي • $from") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), singleLine = true)
+        CurrencyChips(fc, currencies = choices) { from = it!!.name }
+        OutlinedTextField(first, { first = it.take(30) }, Modifier.fillMaxWidth(), label = { Text("المبلغ الأصلي • ${fc.name}") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), singleLine = true)
         Section("المبلغ البديل بالعملة الجديدة")
-        CurrencyChips(tc) { to = it!!.name }
-        OutlinedTextField(second, { second = it.take(30) }, Modifier.fillMaxWidth(), label = { Text("المبلغ البديل • $to") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), singleLine = true)
+        CurrencyChips(tc, currencies = choices) { to = it!!.name }
+        OutlinedTextField(second, { second = it.take(30) }, Modifier.fillMaxWidth(), label = { Text("المبلغ البديل • ${tc.name}") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), singleLine = true)
         if (fm != null && tm != null && fc != tc) {
-            Info("السعر: 1 $from = ${Money.rate(fm, fc, tm, tc)} $to\nسيقل المستحق ${if (receivable) "لنا" else "علينا"} بمقدار ${Money.format(fm, fc)} $from ويزيد بمقدار ${Money.format(tm, tc)} $to.")
+            Info("السعر: 1 ${fc.name} = ${Money.rate(fm, fc, tm, tc)} ${tc.name}\nسيقل المستحق ${if (receivable) "لنا" else "علينا"} بمقدار ${Money.format(fm, fc)} ${fc.name} ويزيد بمقدار ${Money.format(tm, tc)} ${tc.name}.")
         }
         DateField(date, { date = it }, modifier = Modifier.fillMaxWidth())
         OutlinedTextField(note, { note = it.take(500) }, Modifier.fillMaxWidth(), label = { Text("البيان • اختياري") })
@@ -419,7 +422,7 @@ class MainActivity : FragmentActivity() {
                 val available = ledger.balance(account.id, fc, date)
                 require(available.signum() == if (receivable) 1 else -1) { "لا يوجد رصيد ${if (receivable) "لنا" else "علينا"} بهذه العملة والتاريخ" }
                 require(available.abs() >= fa) { "المبلغ أكبر من الرصيد المستحق" }
-                val e = Ledger.exchange(account.id, fc, fa, tc, ta, receivable, date, note.ifBlank { "تبديل عملة رصيد من $from إلى $to" })
+                val e = Ledger.exchange(account.id, fc, fa, tc, ta, receivable, date, note.ifBlank { "تبديل عملة رصيد من ${fc.name} إلى ${tc.name}" })
                 ledger.add(e); onSave(e)
             } catch (e: Exception) { error = e.message ?: "تحقق من المبالغ والعملات" }
         }, Modifier.fillMaxWidth().heightIn(min = 54.dp), enabled = !busy) { Text("تأكيد تبديل العملة") }
