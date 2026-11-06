@@ -41,13 +41,24 @@ object Money {
         BigDecimal(to, toCurrency.decimals).divide(BigDecimal(from, fromCurrency.decimals), 8, RoundingMode.HALF_UP).stripTrailingZeros().toPlainString()
 }
 
-data class Account(val id: String = UUID.randomUUID().toString(), val name: String, val phone: String = "", val archived: Boolean = false)
+enum class AccountGroup(val title: String) { PERSON("شخص"), CUSTOMER("عميل"), AGENT("وكيل"), SUPPLIER("مورد"), OTHER("أخرى") }
+data class Account(val id: String = UUID.randomUUID().toString(), val name: String, val phone: String = "", val archived: Boolean = false,
+    val group: AccountGroup = AccountGroup.PERSON, val favorite: Boolean = false)
+enum class Action(val title: String, val debit: Boolean, val isDebt: Boolean = false) {
+    LEGACY("حركة سابقة", true), OWED_TO_ME("لي عنده", true, true), I_OWE("له عندي", false, true),
+    RECEIVED("استلمت منه", false), PAID("دفعت له", true)
+}
+data class Attachment(val id: String, val name: String, val mime: String, val size: Long)
+data class Payment(val currency: Currency, val units: BigInteger)
+data class Allocation(val debtId: String, val units: BigInteger)
 data class Line(val accountId: String, val currency: Currency, val units: BigInteger)
-enum class EntryKind { NORMAL, OPENING, EXCHANGE, REVERSAL }
+enum class EntryKind { NORMAL, OPENING, EXCHANGE, REVERSAL, SETTLEMENT }
 data class Entry(
     val id: String = UUID.randomUUID().toString(), val date: String = LocalDate.now().toString(),
     val createdAt: Long = System.currentTimeMillis(), val note: String, val reference: String = "",
-    val kind: EntryKind = EntryKind.NORMAL, val reverses: String? = null, val lines: List<Line>
+    val kind: EntryKind = EntryKind.NORMAL, val reverses: String? = null, val lines: List<Line>,
+    val action: Action = Action.LEGACY, val dueDate: String? = null,
+    val payment: Payment? = null, val allocation: Allocation? = null, val attachments: List<Attachment> = emptyList()
 )
 data class StatementRow(val entry: Entry, val line: Line, val balance: BigInteger)
 data class Ledger(val accounts: List<Account> = emptyList(), val entries: List<Entry> = emptyList()) {
@@ -76,13 +87,42 @@ data class Ledger(val accounts: List<Account> = emptyList(), val entries: List<E
             }
         }
     }
+    fun isReversed(id: String) = entries.any { it.reverses == id }
+    fun remaining(debt: Entry, through: String = "9999-12-31"): BigInteger {
+        if (!debt.action.isDebt || debt.date > through || entries.any { it.reverses == debt.id && it.date <= through }) return BigInteger.ZERO
+        val reversed = entries.filter { it.date <= through }.mapNotNull { it.reverses }.toSet()
+        val paid = entries.filter { it.date <= through && it.id !in reversed && it.allocation?.debtId == debt.id }
+            .fold(BigInteger.ZERO) { total, e -> total + e.allocation!!.units }
+        return debt.lines.first().units.abs() - paid
+    }
+    fun openDebts(accountId: String? = null, through: String = LocalDate.now().toString()): List<Entry> = entries.filter {
+        it.action.isDebt && (accountId == null || it.lines.first().accountId == accountId) && remaining(it, through) > BigInteger.ZERO
+    }.sortedWith(compareBy<Entry> { it.dueDate ?: "9999-12-31" }.thenBy { it.date })
+    fun duplicates(candidate: Entry): List<Entry> {
+        val line = candidate.lines.first()
+        return entries.filter { e -> e.kind != EntryKind.REVERSAL && !isReversed(e.id) && e.lines.first().accountId == line.accountId &&
+            ((candidate.reference.isNotBlank() && e.reference.equals(candidate.reference, true)) ||
+             (e.date == candidate.date && e.lines.filter { it.accountId != CONTROL } == candidate.lines.filter { it.accountId != CONTROL })) }
+    }
+    fun settle(accountId: String, debtCurrency: Currency, debtAmount: BigInteger, paidCurrency: Currency, paidAmount: BigInteger,
+        received: Boolean, date: String, note: String, reference: String = "", debtId: String? = null): Entry {
+        require(debtAmount > BigInteger.ZERO && paidAmount > BigInteger.ZERO) { "أدخل مبلغين موجبين" }
+        require(debtCurrency != paidCurrency || debtAmount == paidAmount) { "مبلغ السداد بنفس العملة يجب أن يطابق المبلغ المسدد" }
+        val available = balance(accountId, debtCurrency, date)
+        if (debtId == null) require(available.signum() == (if (received) 1 else -1) && available.abs() >= debtAmount) { "المبلغ المسدد يتجاوز الرصيد المستحق في هذا التاريخ" }
+        val signed = if (received) -debtAmount else debtAmount
+        return Entry(date = date, note = note.trim(), reference = reference.trim(), kind = EntryKind.SETTLEMENT,
+            lines = listOf(Line(accountId, debtCurrency, signed), Line(CONTROL, debtCurrency, -signed)),
+            action = if (received) Action.RECEIVED else Action.PAID, payment = Payment(paidCurrency, paidAmount),
+            allocation = debtId?.let { Allocation(it, debtAmount) })
+    }
     fun add(entry: Entry): Ledger {
         require(entries.none { it.id == entry.id }) { "تم تسجيل هذه الحركة بالفعل" }
         require(entry.lines.filter { it.accountId != CONTROL }.all { line -> accounts.any { it.id == line.accountId && !it.archived } }) { "الحساب غير متاح أو مؤرشف" }
-        if (entry.kind == EntryKind.EXCHANGE) {
+        if (entry.kind == EntryKind.EXCHANGE || entry.kind == EntryKind.SETTLEMENT && entry.allocation == null) {
             val source = entry.lines.first()
             val available = balance(source.accountId, source.currency, entry.date)
-            require(available.signum() == -source.units.signum() && available.abs() >= source.units.abs()) { "الرصيد المتاح لا يكفي لتبديل العملة" }
+            require(available.signum() == -source.units.signum() && available.abs() >= source.units.abs()) { "الرصيد المتاح لا يكفي لهذه العملية في التاريخ المختار" }
         }
         return copy(entries = entries + entry).also { it.validate() }
     }
@@ -118,6 +158,26 @@ data class Ledger(val accounts: List<Account> = emptyList(), val entries: List<E
         accounts.forEach { require(it.id.isNotBlank() && it.id != CONTROL && it.id.length <= 100 && it.name.isNotBlank() && it.name.length <= 80 && it.phone.length <= 80) { "بيانات الحساب غير صالحة" } }
         entries.forEach { entry ->
             require(entry.id.isNotBlank() && entry.id.length <= 100 && entry.createdAt >= 0 && entry.note.isNotBlank() && entry.note.length <= 500 && entry.reference.length <= 100) { "بيانات الحركة غير صالحة" }
+            require(entry.attachments.size <= 5 && entry.attachments.map { it.id }.toSet().size == entry.attachments.size) { "الحد الأقصى 5 مرفقات مختلفة للحركة" }
+            entry.attachments.forEach { a -> require(a.id.matches(Regex("[a-f0-9]{64}")) && a.name.isNotBlank() && a.name.length <= 160 &&
+                (a.mime.startsWith("image/") || a.mime == "application/pdf") && a.mime.length <= 100 && a.size in 1..10_485_760) { "مرفق غير صالح" } }
+            if (entry.action != Action.LEGACY) {
+                require(entry.kind in listOf(EntryKind.NORMAL, EntryKind.OPENING, EntryKind.SETTLEMENT)) { "نوع الحركة لا يقبل هذا التصنيف" }
+                require(entry.lines.isNotEmpty() && entry.lines.first().accountId != CONTROL && entry.lines.first().units.signum() == if (entry.action.debit) 1 else -1) { "اتجاه الحركة لا يطابق نوعها" }
+            }
+            entry.dueDate?.let { due -> require(entry.action.isDebt && LocalDate.parse(due).toString() == due && due >= entry.date && LocalDate.parse(due).year <= 9999) { "الاستحقاق يجب ألا يسبق تاريخ الدين" } }
+            entry.payment?.let { pay -> require(entry.action in listOf(Action.RECEIVED, Action.PAID) && pay.units > BigInteger.ZERO && pay.units.toString().length <= 21) { "بيانات السداد غير صالحة" } }
+            if (entry.kind == EntryKind.SETTLEMENT) require(entry.payment != null) { "السداد يتطلب مبلغ الدفع الفعلي" }
+            if (entry.payment != null) {
+                val l = entry.lines.first()
+                require(entry.payment.currency != l.currency || entry.payment.units == l.units.abs()) { "مبالغ السداد بنفس العملة غير متطابقة" }
+            }
+            if (entry.allocation != null) {
+                val debt = entryById[entry.allocation.debtId]
+                val l = entry.lines.first(); val dl = debt?.lines?.firstOrNull()
+                require(debt != null && debt.action.isDebt && dl != null && entry.action in listOf(Action.RECEIVED, Action.PAID) && entry.date >= debt.date &&
+                    dl.accountId == l.accountId && dl.currency == l.currency && dl.units.signum() != l.units.signum() && entry.allocation.units == l.units.abs()) { "تخصيص السداد لا يطابق الدين" }
+            }
             val parsed = LocalDate.parse(entry.date)
             require(parsed.toString() == entry.date && parsed.year in 1900..9999) { "تاريخ غير صالح" }
             require(entry.lines.size in 2..4 && entry.lines.all { it.units != BigInteger.ZERO && it.units.abs().toString().length <= 21 && (it.accountId == CONTROL || it.accountId in accountIds) }) { "أطراف الحركة غير صالحة" }
@@ -133,6 +193,12 @@ data class Ledger(val accounts: List<Account> = emptyList(), val entries: List<E
                 val original = entryById[entry.reverses]
                 require(original != null && original.kind != EntryKind.REVERSAL && original.id != entry.id && entry.date >= original.date && entry.lines == original.lines.map { it.copy(units = -it.units) }) { "الحركة العكسية غير مطابقة أو تسبق الأصل" }
             } else require(entry.reverses == null) { "مرجع عكس غير صالح" }
+        }
+        val reversedIds = entries.mapNotNull { it.reverses }.toSet()
+        entries.filter { it.action.isDebt }.forEach { debt ->
+            val paid = entries.filter { it.id !in reversedIds && it.allocation?.debtId == debt.id }.fold(BigInteger.ZERO) { sum, e -> sum + e.allocation!!.units }
+            require(paid <= debt.lines.first().units.abs()) { "السدادات المخصصة تتجاوز أصل الدين" }
+            require(debt.id !in reversedIds || paid == BigInteger.ZERO) { "اعكس السدادات المخصصة أولًا قبل عكس الدين" }
         }
         val reversed = entries.mapNotNull { it.reverses }
         require(reversed.toSet().size == reversed.size) { "تم عكس نفس الحركة أكثر من مرة" }

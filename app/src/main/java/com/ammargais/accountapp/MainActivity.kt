@@ -3,7 +3,7 @@ package com.ammargais.accountapp
 import android.app.DatePickerDialog
 import android.content.Intent
 import android.os.Bundle
-import androidx.activity.ComponentActivity
+import androidx.fragment.app.FragmentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -25,6 +25,8 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -40,24 +42,50 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.ammargais.accountapp.core.*
+import com.ammargais.accountapp.io.BackgroundServices
 import java.math.BigInteger
 import java.time.LocalDate
 
-private val Green = Color(0xFF12675B)
-private val Ink = Color(0xFF182F2B)
-private val Red = Color(0xFFAD443B)
-private val Soft = Color(0xFFF4F7F5)
-private fun ltr(value: String) = "\u2066$value\u2069"
+internal val Green = Color(0xFF12675B)
+internal val Ink = Color(0xFF182F2B)
+internal val Red = Color(0xFFAD443B)
+internal val Soft = Color(0xFFF4F7F5)
+internal fun ltr(value: String) = "\u2066$value\u2069"
 
-class MainActivity : ComponentActivity() {
+class MainActivity : FragmentActivity() {
+    var unlocked by mutableStateOf(false); private set
+    var lockEnabled by mutableStateOf(false); private set
+    fun unlock() { unlocked = true }
+    fun setAppLock(enabled: Boolean, onError: (String) -> Unit) {
+        authenticate({
+            BackgroundServices.prefs(this).edit().putBoolean("appLock", enabled).apply()
+            lockEnabled = enabled; unlocked = true
+            if (enabled) window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE) else window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+        }, onError)
+    }
+    override fun onStop() { super.onStop(); if (lockEnabled && !isChangingConfigurations) unlocked = false }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        lockEnabled = BackgroundServices.prefs(this).getBoolean("appLock", false)
+        unlocked = !lockEnabled
+        if (lockEnabled) window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+        BackgroundServices.schedule(this)
         enableEdgeToEdge()
         setContent {
             MaterialTheme(colorScheme = lightColorScheme(primary = Green, onPrimary = Color.White, primaryContainer = Color(0xFFD8EDE7), secondary = Green,
                 onPrimaryContainer = Ink, secondaryContainer = Color(0xFFD8EDE7), onSecondaryContainer = Green,
                 background = Soft, surface = Color.White, onSurface = Ink, onBackground = Ink, error = Red)) {
-                CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) { DaftarApp() }
+                CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
+                    Box(Modifier.fillMaxSize()) {
+                        Box(Modifier.fillMaxSize().then(if (unlocked) Modifier else Modifier.alpha(0f).clearAndSetSemantics {})) { DaftarApp() }
+                        if (!unlocked) androidx.compose.ui.window.Dialog(onDismissRequest = {}, properties = androidx.compose.ui.window.DialogProperties(
+                            dismissOnBackPress = false, dismissOnClickOutside = false, usePlatformDefaultWidth = false,
+                            decorFitsSystemWindows = false, securePolicy = androidx.compose.ui.window.SecureFlagPolicy.SecureOn)) {
+                            Surface(modifier = Modifier.fillMaxSize()) { LockScreen(this@MainActivity) }
+                        }
+                    }
+                }
             }
         }
     }
@@ -68,6 +96,7 @@ class MainActivity : ComponentActivity() {
     var route by rememberSaveable { mutableStateOf("home") }
     var tab by rememberSaveable { mutableStateOf(0) }
     var accountId by rememberSaveable { mutableStateOf("") }
+    var debtId by rememberSaveable { mutableStateOf("") }
     var showAccount by rememberSaveable { mutableStateOf(false) }
     var editingId by rememberSaveable { mutableStateOf("") }
     var exportId by rememberSaveable { mutableStateOf("") }
@@ -78,10 +107,11 @@ class MainActivity : ComponentActivity() {
     val account = ledger.accounts.find { it.id == accountId }
     val snackbar = remember { SnackbarHostState() }
     val context = LocalContext.current
-    val backup = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { it?.let(vm::exportBackup) }
-    val restore = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { it?.let(vm::readBackup) }
     val csv = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/csv")) {
         if (it != null && exportId.isNotBlank()) vm.exportCsv(it, exportId, exportCurrency.takeIf(String::isNotBlank)?.let(Currency::valueOf), exportFrom, exportTo)
+    }
+    val pdf = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) {
+        if (it != null && exportId.isNotBlank()) vm.exportPdf(it, exportId, exportCurrency.takeIf(String::isNotBlank)?.let(Currency::valueOf), exportFrom, exportTo)
     }
     LaunchedEffect(vm.message) { vm.message?.let { snackbar.showSnackbar(it); vm.clearMessage() } }
     LaunchedEffect(route, tab) { snackbar.currentSnackbarData?.dismiss() }
@@ -95,14 +125,14 @@ class MainActivity : ComponentActivity() {
             colors = TopAppBarDefaults.topAppBarColors(containerColor = Soft),
             actions = { if (route == "detail") TextButton(onClick = { editingId = accountId; showAccount = true }, enabled = !vm.busy) { Text("تعديل") } }) },
         bottomBar = { if (route == "home") NavigationBar(containerColor = Color.White) {
-            listOf("الرئيسية", "الحسابات", "الإعدادات").forEachIndexed { i, title -> NavigationBarItem(selected = tab == i, onClick = { tab = i },
-                icon = { Icon(listOf(Icons.Default.Home, Icons.Default.List, Icons.Default.Settings)[i], null) }, label = { Text(title) }) }
+            listOf("الرئيسية", "الحسابات", "المستحقات", "الإعدادات").forEachIndexed { i, title -> NavigationBarItem(selected = tab == i, onClick = { tab = i },
+                icon = { Icon(listOf(Icons.Default.Home, Icons.Default.List, Icons.Default.DateRange, Icons.Default.Settings)[i], null) }, label = { Text(title) }) }
         } },
         floatingActionButton = { if (vm.ready && (route == "home" && tab < 2 && (tab == 1 || ledger.accounts.any { !it.archived }) || route == "detail" && account?.archived == false)) {
             val actionLabel = if (ledger.accounts.none { !it.archived } || route == "home" && tab == 1) "حساب جديد" else "حركة جديدة"
             ExtendedFloatingActionButton(onClick = {
                 if (ledger.accounts.none { !it.archived } || route == "home" && tab == 1) { editingId = ""; showAccount = true }
-                else { if (route == "home") accountId = ""; route = "movement" }
+                else { if (route == "home") accountId = ""; debtId = ""; route = "movement" }
             }, modifier = Modifier.semantics { contentDescription = actionLabel }, icon = { Icon(Icons.Default.Add, null) }, text = { Text(actionLabel) }, containerColor = Green, contentColor = Color.White)
         } }
     ) { padding ->
@@ -110,7 +140,7 @@ class MainActivity : ComponentActivity() {
             if (!vm.ready) Column(Modifier.align(Alignment.Center).padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                 if (vm.busy) CircularProgressIndicator() else { Text("تعذر فتح البيانات؛ بياناتك لم تُحذف"); Button(onClick = { vm.reload() }) { Text("إعادة المحاولة") } }
             } else when (route) {
-                "movement" -> MovementForm(ledger, accountId, vm.busy, onSave = { e -> vm.mutate({ accountId = e.lines.first().accountId; route = "detail" }) { it.add(e) } })
+                "movement" -> MovementForm(ledger, accountId, debtId, vm.busy, vm::importAttachment, onSave = { e -> vm.mutate({ accountId = e.lines.first().accountId; route = "detail" }) { it.add(e) } })
                 "exchange" -> if (account != null) ExchangeForm(ledger, account, vm.busy) { e ->
                     vm.mutate({ route = "detail" }) { current ->
                         val source = e.lines.first(); val available = current.balance(account.id, source.currency, e.date)
@@ -119,6 +149,10 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 "detail" -> if (account != null) AccountDetail(ledger, account, vm.busy,
+                    onPdf = { c, from, to, share ->
+                        if (share) vm.exportPdf(null, account.id, c, from, to)
+                        else { exportId = account.id; exportCurrency = c?.name ?: ""; exportFrom = from; exportTo = to; pdf.launch("Daftar_Statement_${LocalDate.now()}.pdf") }
+                    }, onAttachment = vm::openAttachment,
                     onExchange = { route = "exchange" }, onReverse = { e, reason -> vm.mutate { it.reverse(e, reason) } },
                     onExport = { c, from, to -> exportId = account.id; exportCurrency = c?.name ?: ""; exportFrom = from; exportTo = to; csv.launch("Daftar_Statement_${LocalDate.now()}.csv") },
                     onShare = { through ->
@@ -127,7 +161,8 @@ class MainActivity : ComponentActivity() {
                 else -> when (tab) {
                     0 -> Dashboard(ledger, onOpen = { accountId = it; route = "detail" }, onAdd = { editingId = ""; showAccount = true })
                     1 -> AccountList(ledger) { accountId = it; route = "detail" }
-                    else -> SettingsScreen(vm.busy, ledger, onBackup = { backup.launch("Daftar_Backup_${LocalDate.now()}.json") }, onRestore = { restore.launch(arrayOf("application/json", "text/plain", "application/octet-stream")) })
+                    2 -> DueScreen(ledger) { debt -> accountId = debt.lines.first().accountId; debtId = debt.id; route = "movement" }
+                    else -> SettingsScreen(vm)
                 }
             }
             if (vm.busy && vm.ready) LinearProgressIndicator(Modifier.fillMaxWidth().align(Alignment.TopCenter))
@@ -140,23 +175,23 @@ class MainActivity : ComponentActivity() {
         dismissButton = { TextButton(onClick = { vm.dismissRestore() }, enabled = !vm.busy) { Text("إلغاء") } }) }
 }
 
-@Composable private fun NumberText(text: String, modifier: Modifier = Modifier, color: Color = Ink, large: Boolean = false) {
+@Composable internal fun NumberText(text: String, modifier: Modifier = Modifier, color: Color = Ink, large: Boolean = false) {
     Text(text, modifier, color = color, fontWeight = FontWeight.Bold, fontSize = if (large) 28.sp else 17.sp,
         style = MaterialTheme.typography.bodyLarge.copy(textDirection = TextDirection.Ltr))
 }
-@Composable private fun CurrencyChips(selected: Currency?, allowAll: Boolean = false, select: (Currency?) -> Unit) {
-    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+@Composable internal fun CurrencyChips(selected: Currency?, allowAll: Boolean = false, select: (Currency?) -> Unit) {
+    FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         if (allowAll) FilterChip(selected = selected == null, onClick = { select(null) }, label = { Text("الكل") })
         Currency.entries.forEach { c -> FilterChip(selected = selected == c, onClick = { select(c) }, label = { Text(c.name) }) }
     }
 }
-@Composable private fun Info(text: String) {
+@Composable internal fun Info(text: String) {
     Surface(color = MaterialTheme.colorScheme.primaryContainer, shape = RoundedCornerShape(16.dp)) {
         Text(text, Modifier.fillMaxWidth().padding(16.dp), style = MaterialTheme.typography.bodyMedium)
     }
 }
-@Composable private fun Section(title: String) { Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold) }
-@Composable private fun Empty(title: String, body: String) {
+@Composable internal fun Section(title: String) { Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold) }
+@Composable internal fun Empty(title: String, body: String) {
     Column(Modifier.fillMaxWidth().padding(vertical = 32.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Icon(Icons.Default.List, null, Modifier.size(40.dp), tint = Green)
         Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
@@ -210,14 +245,19 @@ class MainActivity : ComponentActivity() {
 @Composable private fun AccountList(ledger: Ledger, onOpen: (String) -> Unit) {
     var search by rememberSaveable { mutableStateOf("") }
     var archived by rememberSaveable { mutableStateOf(false) }
-    val filtered = ledger.accounts.filter { it.archived == archived && (it.name.contains(search, true) || it.phone.contains(search)) }.sortedBy { it.name }
+    var group by rememberSaveable { mutableStateOf("") }
+    val filtered = ledger.accounts.filter { it.archived == archived && (group.isBlank() || it.group.name == group) && (it.name.contains(search, true) || it.phone.contains(search)) }.sortedWith(compareByDescending<Account> { it.favorite }.thenBy { it.name })
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp, 8.dp, 20.dp, 110.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item { OutlinedTextField(search, { search = it }, Modifier.fillMaxWidth(), label = { Text("ابحث باسم الحساب أو الهاتف") }, leadingIcon = { Icon(Icons.Default.Search, null) }, singleLine = true) }
         item { Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { FilterChip(!archived, { archived = false }, label = { Text("نشطة") }); FilterChip(archived, { archived = true }, label = { Text("مؤرشفة") }) } }
+        item { Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilterChip(group.isBlank(), { group = "" }, label = { Text("كل التصنيفات") })
+            AccountGroup.entries.forEach { g -> FilterChip(group == g.name, { group = g.name }, label = { Text(g.title) }) }
+        } }
         if (filtered.isEmpty()) item { Empty("لا توجد حسابات هنا", "أضف حسابًا أو غيّر البحث.") }
         items(filtered, key = { it.id }) { a -> Surface(onClick = { onOpen(a.id) }, shape = RoundedCornerShape(18.dp)) {
             Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(a.name, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
+                Text((if (a.favorite) "★ " else "") + a.name + " • " + a.group.title, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
                 val balances = Currency.entries.map { it to ledger.balance(a.id, it) }.filter { it.second != BigInteger.ZERO }
                 if (balances.isEmpty()) Text("لا يوجد رصيد مستحق", color = Green)
                 balances.forEach { (c, b) -> Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -230,7 +270,7 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable private fun AccountDetail(ledger: Ledger, account: Account, busy: Boolean, onExchange: () -> Unit, onReverse: (Entry, String) -> Unit,
-    onExport: (Currency?, String, String) -> Unit, onShare: (String) -> Unit) {
+    onExport: (Currency?, String, String) -> Unit, onShare: (String) -> Unit, onPdf: (Currency?, String, String, Boolean) -> Unit, onAttachment: (Attachment) -> Unit) {
     var currency by rememberSaveable(account.id) { mutableStateOf("") }
     var search by rememberSaveable(account.id) { mutableStateOf("") }
     var from by rememberSaveable(account.id) { mutableStateOf("") }
@@ -260,12 +300,16 @@ class MainActivity : ComponentActivity() {
             OutlinedButton(onClick = { onExport(selectedCurrency, start, end) }, enabled = validRange && !busy, modifier = Modifier.weight(1f)) { Text("كشف CSV") }
             OutlinedButton(onClick = { onShare(end) }, enabled = !busy, modifier = Modifier.weight(1f)) { Text("مشاركة الرصيد") }
         } }
+        item { Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = { onPdf(selectedCurrency, start, end, false) }, enabled = validRange && !busy, modifier = Modifier.weight(1f)) { Text("حفظ PDF") }
+            OutlinedButton(onClick = { onPdf(selectedCurrency, start, end, true) }, enabled = validRange && !busy, modifier = Modifier.weight(1f)) { Text("مشاركة PDF") }
+        } }
         if (!account.archived) item { TextButton(onClick = onExchange, enabled = !busy) { Text("تبديل عملة مبلغ مستحق") } }
         item { Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) { Section("كشف الحركات"); TextButton(onClick = { filters = !filters }) { Text(if (filters) "إخفاء التصفية" else "بحث وتصفية") } } }
         if (filters) {
             item { OutlinedTextField(search, { search = it }, Modifier.fillMaxWidth(), label = { Text("ابحث في البيان أو المرجع") }, singleLine = true) }
             item { Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { DateField(from, { from = it }, "من تاريخ", Modifier.weight(1f)); DateField(to, { to = it }, "إلى تاريخ", Modifier.weight(1f)) } }
-            item { TextButton(onClick = { from = ""; to = ""; search = "" }) { Text("مسح التصفية") }; Text("ملف CSV يشمل الفترة والعملة المختارتين؛ البحث النصي يخص العرض هنا.", style = MaterialTheme.typography.bodySmall) }
+            item { TextButton(onClick = { from = ""; to = ""; search = "" }) { Text("مسح التصفية") }; Text("ملفات PDF وCSV تشمل الفترة والعملة المختارتين؛ البحث النصي يخص العرض هنا.", style = MaterialTheme.typography.bodySmall) }
         }
         if (!validRange) item { Text("تاريخ البداية بعد تاريخ النهاية", color = Red) }
         if (rows.isEmpty() && validRange) item { Empty("لا توجد حركات", "أضف حركة أو غيّر خيارات التصفية.") }
@@ -284,6 +328,16 @@ class MainActivity : ComponentActivity() {
         val canReverse = e.kind != EntryKind.REVERSAL && ledger.entries.none { it.reverses == e.id }
         AlertDialog(onDismissRequest = { if (!busy) selectedId = "" }, title = { Text("تفاصيل الحركة") }, text = {
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                if (e.action != Action.LEGACY) Text(e.action.title, fontWeight = FontWeight.Bold)
+                e.payment?.let { p ->
+                    val l = e.lines.first()
+                    Text("الدفع الفعلي: ${Money.format(p.units, p.currency)} ${p.currency.name}")
+                    Text("السعر: 1 ${l.currency} = ${Money.rate(l.units.abs(), l.currency, p.units, p.currency)} ${p.currency}")
+                }
+                e.dueDate?.let { Text("موعد الاستحقاق: ${ltr(it)}") }
+                e.allocation?.let { Text("سداد مرتبط بالدين: ${it.debtId.take(8)}") }
+                if (e.action.isDebt) Text("المتبقي المخصص لهذا الدين: ${Money.format(ledger.remaining(e), e.lines.first().currency)} ${e.lines.first().currency}")
+                e.attachments.forEach { a -> TextButton(onClick = { onAttachment(a) }, enabled = !busy) { Text("فتح المرفق: ${a.name}") } }
                 Text(e.note); Text("التاريخ: ${ltr(e.date)}"); Text("المرجع: ${e.reference.ifEmpty { "—" }}")
                 Text("معرّف: ${e.id.take(8)}", style = MaterialTheme.typography.bodySmall)
                 e.lines.filter { it.accountId != Ledger.CONTROL }.forEach { Text("${it.currency}  ${Money.format(it.units.abs(), it.currency)}  ${if (it.units.signum() > 0) "مدين" else "دائن"}") }
@@ -298,68 +352,34 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-@Composable private fun DateField(value: String, onChange: (String) -> Unit, label: String = "التاريخ", modifier: Modifier = Modifier) {
+@Composable internal fun DateField(value: String, onChange: (String) -> Unit, label: String = "التاريخ", modifier: Modifier = Modifier, allowFuture: Boolean = false) {
     val context = LocalContext.current
     OutlinedButton(onClick = {
         val date = runCatching { LocalDate.parse(value) }.getOrDefault(LocalDate.now())
-        DatePickerDialog(context, { _, y, m, d -> onChange(LocalDate.of(y, m + 1, d).toString()) }, date.year, date.monthValue - 1, date.dayOfMonth).apply { datePicker.maxDate = System.currentTimeMillis() }.show()
+        DatePickerDialog(context, { _, y, m, d -> onChange(LocalDate.of(y, m + 1, d).toString()) }, date.year, date.monthValue - 1, date.dayOfMonth).apply { if (!allowFuture) datePicker.maxDate = System.currentTimeMillis() }.show()
     }, modifier = modifier.heightIn(min = 52.dp)) { Text("$label: ${if (value.isEmpty()) "الكل" else ltr(value)}") }
 }
 
 @Composable private fun AccountDialog(existing: Account?, busy: Boolean, onDismiss: () -> Unit, onSave: (Account) -> Unit) {
     var name by rememberSaveable(existing?.id) { mutableStateOf(existing?.name ?: "") }
     var phone by rememberSaveable(existing?.id) { mutableStateOf(existing?.phone ?: "") }
+    var group by rememberSaveable(existing?.id) { mutableStateOf(existing?.group?.name ?: "PERSON") }
+    var favorite by rememberSaveable(existing?.id) { mutableStateOf(existing?.favorite ?: false) }
+    var groupMenu by remember { mutableStateOf(false) }
     var archived by rememberSaveable(existing?.id) { mutableStateOf(existing?.archived ?: false) }
     AlertDialog(onDismissRequest = { if (!busy) onDismiss() }, title = { Text(if (existing == null) "حساب جديد" else "تعديل الحساب") }, text = {
         Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             OutlinedTextField(name, { name = it.take(80) }, label = { Text("اسم الشخص أو الجهة") }, singleLine = true)
             OutlinedTextField(phone, { phone = it.take(80) }, label = { Text("رقم الهاتف • اختياري") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone), singleLine = true)
+            Box { OutlinedButton(onClick = { groupMenu = true }) { Text("التصنيف: ${AccountGroup.valueOf(group).title}") }
+                DropdownMenu(groupMenu, { groupMenu = false }) { AccountGroup.entries.forEach { g -> DropdownMenuItem(text = { Text(g.title) }, onClick = { group = g.name; groupMenu = false }) } }
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(favorite, { favorite = it }); Text("تثبيت ضمن الحسابات المفضلة") }
             if (existing != null) Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(archived, { archived = it }); Text("أرشفة الحساب وإيقاف الحركات الجديدة") }
             Text("يمكن تسجيل الأرصدة الافتتاحية بعد إنشاء الحساب من حركة جديدة.", style = MaterialTheme.typography.bodySmall)
         }
-    }, confirmButton = { TextButton(onClick = { onSave((existing ?: Account(name = name)).copy(name = name, phone = phone, archived = archived)) }, enabled = name.isNotBlank() && !busy) { Text("حفظ الحساب") } },
+    }, confirmButton = { TextButton(onClick = { onSave((existing ?: Account(name = name)).copy(name = name, phone = phone, archived = archived, group = AccountGroup.valueOf(group), favorite = favorite)) }, enabled = name.isNotBlank() && !busy) { Text("حفظ الحساب") } },
         dismissButton = { TextButton(onClick = onDismiss, enabled = !busy) { Text("إلغاء") } })
-}
-
-@Composable private fun MovementForm(ledger: Ledger, initialAccount: String, busy: Boolean, onSave: (Entry) -> Unit) {
-    var id by rememberSaveable { mutableStateOf(initialAccount) }
-    var code by rememberSaveable { mutableStateOf("AED") }
-    var amount by rememberSaveable { mutableStateOf("") }
-    var debit by rememberSaveable { mutableStateOf(true) }
-    var date by rememberSaveable { mutableStateOf(LocalDate.now().toString()) }
-    var note by rememberSaveable { mutableStateOf("") }
-    var reference by rememberSaveable { mutableStateOf("") }
-    var opening by rememberSaveable { mutableStateOf(false) }
-    var accountMenu by remember { mutableStateOf(false) }
-    var error by rememberSaveable { mutableStateOf("") }
-    val c = Currency.valueOf(code)
-    val parsed = runCatching { Money.parse(amount, c) }
-    val account = ledger.accounts.find { it.id == id }
-    val preview = parsed.getOrNull()?.let { ledger.balance(id, c) + if (debit) it else -it }
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).imePadding().padding(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        Box { OutlinedButton(onClick = { accountMenu = true }, Modifier.fillMaxWidth()) { Text(account?.name ?: "اختر الحساب") }
-            DropdownMenu(accountMenu, { accountMenu = false }) { ledger.accounts.filter { !it.archived }.forEach { a -> DropdownMenuItem(text = { Text(a.name) }, onClick = { id = a.id; accountMenu = false }) } }
-        }
-        DirectionSelector(debit) { debit = it }
-        Text(if (debit) "يزيد المستحق لك على هذا الحساب، أو يقلّل ما عليك له." else "يزيد المستحق لهذا الحساب عليك، أو يقلّل ما لك عليه.", style = MaterialTheme.typography.bodyMedium)
-        CurrencyChips(c) { code = it!!.name }
-        OutlinedTextField(amount, { amount = it.take(30); error = "" }, Modifier.fillMaxWidth(), label = { Text("المبلغ • ${c.title}") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), singleLine = true,
-            isError = amount.isNotEmpty() && parsed.isFailure, supportingText = { if (amount.isNotEmpty() && parsed.isFailure) Text(parsed.exceptionOrNull()?.message ?: "مبلغ غير صالح") }, textStyle = MaterialTheme.typography.headlineSmall.copy(textDirection = TextDirection.Ltr))
-        DateField(date, { date = it }, modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(note, { note = it.take(500) }, Modifier.fillMaxWidth(), label = { Text("البيان • مثال: سداد أو مبلغ مستحق") }, minLines = 2)
-        OutlinedTextField(reference, { reference = it.take(100) }, Modifier.fillMaxWidth(), label = { Text("رقم الإيصال أو المرجع • اختياري") }, singleLine = true)
-        Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(opening, { opening = it }); Text("هذه الحركة رصيد افتتاحي") }
-        if (account != null && preview != null) Info("الرصيد بعد الحفظ: ${ltr("${Money.format(preview.abs(), c)} ${c.name}")} — ${Statement.side(preview)}")
-        if (error.isNotBlank()) Text(error, color = Red)
-        Button(onClick = {
-            try {
-                require(account != null && !account.archived) { "اختر حسابًا نشطًا" }
-                val e = Ledger.movement(id, c, Money.parse(amount, c), debit, date, note.ifBlank { if (opening) "رصيد افتتاحي" else if (debit) "حركة مدين" else "حركة دائن" }, reference, opening)
-                ledger.add(e); onSave(e)
-            } catch (e: Exception) { error = e.message ?: "تحقق من بيانات الحركة" }
-        }, Modifier.fillMaxWidth().heightIn(min = 54.dp), enabled = !busy) { Text(if (busy) "جارٍ الحفظ…" else "حفظ الحركة") }
-        Spacer(Modifier.height(24.dp))
-    }
 }
 
 @Composable private fun DirectionSelector(debit: Boolean, onChange: (Boolean) -> Unit) {
@@ -407,21 +427,3 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-@Composable private fun SettingsScreen(busy: Boolean, ledger: Ledger, onBackup: () -> Unit, onRestore: () -> Unit) {
-    val last = LocalContext.current.getSharedPreferences("prefs", 0).getString("lastBackup", null)
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(20.dp)) {
-        Section("حماية دفتر الحسابات")
-        Info("الحركات تُحفظ تلقائيًا داخل الجهاز. احفظ نسخة احتياطية خارج التطبيق قبل تغيير الهاتف أو إزالته.")
-        Button(onClick = onBackup, enabled = !busy, modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp)) { Text("حفظ نسخة احتياطية") }
-        Text("آخر نسخة: ${last ?: "لم تُحفظ نسخة بعد"}", style = MaterialTheme.typography.bodySmall)
-        OutlinedButton(onClick = onRestore, enabled = !busy, modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp)) { Text("استعادة نسخة احتياطية") }
-        Text("اختر مكان الحفظ من مدير الملفات، أو Google Drive إذا ظهر ضمن خيارات جهازك. النسخة ملف غير مشفّر؛ احتفظ بها في مكان خاص.", style = MaterialTheme.typography.bodyMedium)
-        HorizontalDivider()
-        Section("دليل سريع")
-        Text("• مدين: يزيد المبلغ المستحق لك أو يقلّل ما عليك.\n• دائن: يزيد المبلغ المستحق عليك أو يقلّل ما لك.\n• استلام سداد من شخص: سجّل دائن. دفع مبلغ له: سجّل مدين.\n• لكل عملة رصيد مستقل؛ USDT منفصلة عن USD.\n• لتصحيح خطأ: افتح الحركة واعكسها، ثم أضف الصحيحة.\n• CSV لكشف الحساب؛ النسخة الاحتياطية لاستعادة الدفتر كاملًا.")
-        Section("عن دفتر")
-        Text("دفتر بسيط لحسابات الأشخاص والجهات، يعمل دون إنترنت أو تسجيل دخول. لا يحتسب أرباحًا أو ضرائب، ولا يقيّم العملات تلقائيًا.")
-        Text("الإصدار 0.1.0 • نسخة تجريبية\n${ledger.accounts.size} حساب • ${ledger.entries.size} حركة", style = MaterialTheme.typography.bodySmall)
-        Spacer(Modifier.height(24.dp))
-    }
-}
