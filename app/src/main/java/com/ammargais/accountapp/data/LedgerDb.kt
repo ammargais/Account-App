@@ -18,13 +18,18 @@ class LedgerDb(context: Context, name: String = "daftar.db") : SQLiteOpenHelper(
         error("تحتاج قاعدة البيانات ترقية مدعومة؛ لم نحذف بياناتك")
     }
     @Synchronized fun load(): Ledger {
-        val accounts = readableDatabase.rawQuery("SELECT payload FROM accounts ORDER BY rowid", null).use { c ->
-            buildList { while (c.moveToNext()) add(BackupCodec.account(JSONObject(c.getString(0)))) }
-        }
-        val entries = readableDatabase.rawQuery("SELECT payload FROM journal ORDER BY rowid", null).use { c ->
-            buildList { while (c.moveToNext()) add(BackupCodec.entry(JSONObject(c.getString(0)))) }
-        }
-        return Ledger(accounts, entries).also { it.validate() }
+        val db = readableDatabase
+        val ownsTransaction = !db.inTransaction()
+        if (ownsTransaction) db.beginTransactionNonExclusive()
+        try {
+            val accounts = db.rawQuery("SELECT payload FROM accounts ORDER BY rowid", null).use { c ->
+                buildList { while (c.moveToNext()) add(BackupCodec.account(JSONObject(c.getString(0)))) }
+            }
+            val entries = db.rawQuery("SELECT payload FROM journal ORDER BY rowid", null).use { c ->
+                buildList { while (c.moveToNext()) add(BackupCodec.entry(JSONObject(c.getString(0)))) }
+            }
+            return Ledger(accounts, entries).also { it.validate(); if (ownsTransaction) db.setTransactionSuccessful() }
+        } finally { if (ownsTransaction) db.endTransaction() }
     }
     @Synchronized fun update(transform: (Ledger) -> Ledger): Ledger {
         val db = writableDatabase

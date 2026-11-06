@@ -120,7 +120,7 @@ class LedgerTest {
     }
     @Test fun invalidBackupDoesNotPassValidation() {
         val encoded = BackupCodec.encode(base.add(entry("100")))
-        fails { BackupCodec.decode(encoded.replace("\"version\":1", "\"version\":99")) }
+        fails { BackupCodec.decode(org.json.JSONObject(encoded).put("version", 99).toString()) }
         fails { BackupCodec.decode(encoded.replace("USD", "GBP")) }
     }
     @Test fun csvEscapesFormulasQuotesAndIncludesOpening() {

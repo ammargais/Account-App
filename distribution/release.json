@@ -1,0 +1,10 @@
+{
+  "tag": "v0.2.0-preview",
+  "application_id": "com.ammargais.accountapp",
+  "version_code": 2,
+  "version_name": "0.2.0",
+  "apk_sha256": "36980365ba01ee45531f1ff4b77b4a9af77bf7881c1b9efa863e96f6aafc7841",
+  "signer_sha256": "c15ac5c76c428029b37772acf803d9a48909e6c115297df4b5d4450c022d88c9",
+  "source_sha256": "b82bb27562584b06612e828456d1f4f9b3183acbc79ad903643e8b8c6d087991",
+  "blob_sha": "92eddb448e3671aad26accdf639ba425c8d617f2"
+}
