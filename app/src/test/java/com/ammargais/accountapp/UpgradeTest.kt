@@ -10,7 +10,7 @@ import java.util.zip.ZipOutputStream
 
 class UpgradeTest {
     private val account = Account("a", "وكيل تجريبي", group = AccountGroup.AGENT, favorite = true)
-    private val base = Ledger(listOf(account))
+    private val base = Ledger(listOf(account), currencies = Currency.entries)
     private fun money(s: String, c: Currency = Currency.USD) = Money.parse(s, c)
     private fun debt(receivable: Boolean = true, amount: String = "100", due: String? = "2026-11-10") = Ledger.movement("a", Currency.USD, money(amount), receivable, "2026-11-01", "خدمة", "REF-1")
         .copy(action = if (receivable) Action.OWED_TO_ME else Action.I_OWE, dueDate = due)

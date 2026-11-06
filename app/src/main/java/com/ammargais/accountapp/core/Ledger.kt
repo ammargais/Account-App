@@ -6,11 +6,6 @@ import java.math.RoundingMode
 import java.time.LocalDate
 import java.util.UUID
 
-enum class Currency(val title: String, val decimals: Int = 2) {
-    AED("درهم إماراتي"), SDG("جنيه سوداني"), SAR("ريال سعودي"),
-    EGP("جنيه مصري"), USD("دولار أمريكي"), USDT("تيثر", 6)
-}
-
 object Money {
     fun parse(raw: String, currency: Currency): BigInteger {
         val input = raw.trim().map { c ->
@@ -22,7 +17,8 @@ object Money {
                 else -> c
             }
         }.joinToString("")
-        require(input.matches(Regex("(?:[0-9]+|[0-9]{1,3}(?:,[0-9]{3})+)(?:\\.[0-9]{1,${currency.decimals}})?"))) {
+        val fractional = if (currency.decimals == 0) "" else "(?:\\.[0-9]{1,${currency.decimals}})?"
+        require(input.matches(Regex("(?:[0-9]+|[0-9]{1,3}(?:,[0-9]{3})+)$fractional"))) {
             "أدخل مبلغًا صحيحًا؛ ${currency.name} تقبل حتى ${currency.decimals} منازل عشرية. مثال: 1,250.50"
         }
         val value = BigDecimal(input.replace(",", ""))
@@ -32,7 +28,7 @@ object Money {
     fun plain(units: BigInteger, currency: Currency): String = BigDecimal(units, currency.decimals).toPlainString()
     fun format(units: BigInteger, currency: Currency): String {
         val value = BigDecimal(units.abs(), currency.decimals)
-        val scale = if (currency == Currency.USDT) value.stripTrailingZeros().scale().coerceAtLeast(2) else 2
+        val scale = value.stripTrailingZeros().scale().coerceIn(minOf(2, currency.decimals), currency.decimals)
         val parts = value.setScale(scale).toPlainString().split('.')
         val grouped = parts[0].reversed().chunked(3).joinToString(",").reversed()
         return (if (units.signum() < 0) "−" else "") + grouped + if (parts.size > 1) ".${parts[1]}" else ""
@@ -43,7 +39,8 @@ object Money {
 
 enum class AccountGroup(val title: String) { PERSON("شخص"), CUSTOMER("عميل"), AGENT("وكيل"), SUPPLIER("مورد"), OTHER("أخرى") }
 data class Account(val id: String = UUID.randomUUID().toString(), val name: String, val phone: String = "", val archived: Boolean = false,
-    val group: AccountGroup = AccountGroup.PERSON, val favorite: Boolean = false)
+    val group: AccountGroup = AccountGroup.PERSON, val favorite: Boolean = false,
+    val currencyCodes: List<String>? = null, val summaryCurrency: String? = null)
 enum class Action(val title: String, val debit: Boolean, val isDebt: Boolean = false) {
     LEGACY("حركة سابقة", true), OWED_TO_ME("لي عنده", true, true), I_OWE("له عندي", false, true),
     RECEIVED("استلمت منه", false), PAID("دفعت له", true)
@@ -61,7 +58,15 @@ data class Entry(
     val payment: Payment? = null, val allocation: Allocation? = null, val attachments: List<Attachment> = emptyList()
 )
 data class StatementRow(val entry: Entry, val line: Line, val balance: BigInteger)
-data class Ledger(val accounts: List<Account> = emptyList(), val entries: List<Entry> = emptyList()) {
+data class Ledger(val accounts: List<Account> = emptyList(), val entries: List<Entry> = emptyList(),
+    val currencies: List<Currency> = entries.flatMap { e -> e.lines.map { it.currency } + listOfNotNull(e.payment?.currency) }.distinct(),
+    val settings: BookSettings = BookSettings()) {
+    fun currency(code: String): Currency = currencies.find { it.name == code } ?: throw IllegalArgumentException("العملة غير معرفة: $code")
+    fun currenciesFor(account: Account): List<Currency> = currencies.filter { account.currencyCodes == null || it.name in account.currencyCodes }
+    fun addCurrency(currency: Currency): Ledger {
+        require(currencies.none { it.name == currency.name }) { "رمز العملة مسجل بالفعل" }
+        return copy(currencies = currencies + currency).also { it.validate() }
+    }
     private val currentBalances by lazy {
         val values = mutableMapOf<Pair<String, Currency>, BigInteger>()
         entries.forEach { e -> e.lines.forEach { l -> val key = l.accountId to l.currency; values[key] = values.getOrDefault(key, BigInteger.ZERO) + l.units } }
@@ -118,7 +123,10 @@ data class Ledger(val accounts: List<Account> = emptyList(), val entries: List<E
     }
     fun add(entry: Entry): Ledger {
         require(entries.none { it.id == entry.id }) { "تم تسجيل هذه الحركة بالفعل" }
+        require(entry.lines.isNotEmpty()) { "الحركة بلا أطراف" }
         require(entry.lines.filter { it.accountId != CONTROL }.all { line -> accounts.any { it.id == line.accountId && !it.archived } }) { "الحساب غير متاح أو مؤرشف" }
+        val account = accounts.first { it.id == entry.lines.first().accountId }
+        require(entry.lines.all { it.currency in currenciesFor(account) } && (entry.payment == null || entry.payment.currency in currenciesFor(account))) { "اختر عملة مفعلة لهذا الحساب" }
         if (entry.kind == EntryKind.EXCHANGE || entry.kind == EntryKind.SETTLEMENT && entry.allocation == null) {
             val source = entry.lines.first()
             val available = balance(source.accountId, source.currency, entry.date)
@@ -147,16 +155,32 @@ data class Ledger(val accounts: List<Account> = emptyList(), val entries: List<E
         val existingEntries = entries.associateBy { it.id }
         require(other.entries.all { existingEntries[it.id] == null || existingEntries[it.id] == it }) { "النسخة تحتوي حركة متعارضة؛ لم تتغير بياناتك" }
         // Current account labels take precedence; immutable journal IDs prevent duplicates.
-        return Ledger(accounts + other.accounts.filter { it.id !in existingAccounts }, entries + other.entries.filter { it.id !in existingEntries }).also { it.validate() }
+        require(other.currencies.all { incoming -> currencies.none { it.name == incoming.name && it != incoming } }) { "تعريف عملة متعارض؛ لم تتغير بياناتك" }
+        val mergedCurrencies = currencies + other.currencies.filter { c -> currencies.none { it.name == c.name } }
+        val mergedAccounts = accounts.map { a ->
+            val imported = other.accounts.find { it.id == a.id }
+            if (imported == null || a.currencyCodes == null) a else a.copy(currencyCodes = (a.currencyCodes + (imported.currencyCodes ?: other.currencies.map { it.name })).distinct())
+        } + other.accounts.filter { it.id !in existingAccounts }
+        val mergedRates = settings.rates + other.settings.rates.filter { r -> settings.rates.none { it.from == r.from && it.to == r.to && it.date == r.date } }
+        return copy(accounts = mergedAccounts, entries = entries + other.entries.filter { it.id !in existingEntries }, currencies = mergedCurrencies,
+            settings = settings.copy(summaryCurrency = settings.summaryCurrency ?: other.settings.summaryCurrency, rates = mergedRates)).also { it.validate() }
     }
     fun validate() {
+        require(currencies.size <= 100 && currencies.map { it.name }.distinct().size == currencies.size) { "تعريفات العملات مكررة أو كثيرة" }
+        currencies.forEach { it.validate() }
+        settings.validate(currencies)
         require(accounts.size <= 5000 && entries.size <= 50000) { "تجاوز الملف حدود هذه النسخة" }
         require(accounts.map { it.id }.toSet().size == accounts.size && entries.map { it.id }.toSet().size == entries.size) { "معرّفات مكررة" }
         require(accounts.map { it.name.trim().lowercase(java.util.Locale.ROOT) }.toSet().size == accounts.size) { "يوجد حسابان مختلفان بالاسم نفسه؛ غيّر اسم أحدهما قبل الدمج" }
         val accountIds = accounts.map { it.id }.toSet()
         val entryById = entries.associateBy { it.id }
         accounts.forEach { require(it.id.isNotBlank() && it.id != CONTROL && it.id.length <= 100 && it.name.isNotBlank() && it.name.length <= 80 && it.phone.length <= 80) { "بيانات الحساب غير صالحة" } }
+        accounts.forEach { a ->
+            require(a.currencyCodes == null || a.currencyCodes.distinct().size == a.currencyCodes.size && a.currencyCodes.all { code -> currencies.any { it.name == code } }) { "عملات الحساب غير صالحة" }
+            require(a.summaryCurrency == null || currencies.any { it.name == a.summaryCurrency }) { "عملة ملخص الحساب غير معرفة" }
+        }
         entries.forEach { entry ->
+            require(entry.lines.all { it.currency in currencies } && (entry.payment == null || entry.payment.currency in currencies)) { "الحركة تحتوي عملة غير معرفة" }
             require(entry.id.isNotBlank() && entry.id.length <= 100 && entry.createdAt >= 0 && entry.note.isNotBlank() && entry.note.length <= 500 && entry.reference.length <= 100) { "بيانات الحركة غير صالحة" }
             require(entry.attachments.size <= 5 && entry.attachments.map { it.id }.toSet().size == entry.attachments.size) { "الحد الأقصى 5 مرفقات مختلفة للحركة" }
             entry.attachments.forEach { a -> require(a.id.matches(Regex("[a-f0-9]{64}")) && a.name.isNotBlank() && a.name.length <= 160 &&
@@ -166,7 +190,7 @@ data class Ledger(val accounts: List<Account> = emptyList(), val entries: List<E
                 require(entry.lines.isNotEmpty() && entry.lines.first().accountId != CONTROL && entry.lines.first().units.signum() == if (entry.action.debit) 1 else -1) { "اتجاه الحركة لا يطابق نوعها" }
             }
             entry.dueDate?.let { due -> require(entry.action.isDebt && LocalDate.parse(due).toString() == due && due >= entry.date && LocalDate.parse(due).year <= 9999) { "الاستحقاق يجب ألا يسبق تاريخ الدين" } }
-            entry.payment?.let { pay -> require(entry.action in listOf(Action.RECEIVED, Action.PAID) && pay.units > BigInteger.ZERO && pay.units.toString().length <= 21) { "بيانات السداد غير صالحة" } }
+            entry.payment?.let { pay -> require(entry.action in listOf(Action.RECEIVED, Action.PAID) && pay.units > BigInteger.ZERO && pay.units.toString().length <= 23) { "بيانات السداد غير صالحة" } }
             if (entry.kind == EntryKind.SETTLEMENT) require(entry.payment != null) { "السداد يتطلب مبلغ الدفع الفعلي" }
             if (entry.payment != null) {
                 val l = entry.lines.first()
@@ -180,7 +204,7 @@ data class Ledger(val accounts: List<Account> = emptyList(), val entries: List<E
             }
             val parsed = LocalDate.parse(entry.date)
             require(parsed.toString() == entry.date && parsed.year in 1900..9999) { "تاريخ غير صالح" }
-            require(entry.lines.size in 2..4 && entry.lines.all { it.units != BigInteger.ZERO && it.units.abs().toString().length <= 21 && (it.accountId == CONTROL || it.accountId in accountIds) }) { "أطراف الحركة غير صالحة" }
+            require(entry.lines.size in 2..4 && entry.lines.all { it.units != BigInteger.ZERO && it.units.abs().toString().length <= 23 && (it.accountId == CONTROL || it.accountId in accountIds) }) { "أطراف الحركة غير صالحة" }
             require(entry.lines.filter { it.accountId != CONTROL }.map { it.accountId }.toSet().size == 1) { "كل حركة تخص حسابًا واحدًا" }
             entry.lines.groupBy { it.currency }.forEach { (_, lines) ->
                 require(lines.size == 2 && lines.count { it.accountId == CONTROL } == 1 && lines.fold(BigInteger.ZERO) { total, line -> total + line.units } == BigInteger.ZERO) { "القيد غير متوازن داخل العملة" }

@@ -19,7 +19,7 @@ class DeviceFeatureTest {
     @Test fun nativePdfIsReadableAndHasMultiplePages() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val account = Account("pdf-test", "حساب تجريبي عربي")
-        var ledger = Ledger(listOf(account))
+        var ledger = Ledger(listOf(account), currencies = Currency.entries)
         repeat(30) { index -> ledger = ledger.add(Ledger.movement(account.id, Currency.USD, BigInteger("10000"), true, "2026-11-01", "حجز تجريبي ${index + 1} — بيان عربي واضح", "REF-$index")) }
         val file = File(context.cacheDir, "device-statement.pdf")
         file.outputStream().use { StatementPdf.write(it, ledger, account, null, "2026-11-01", "2026-11-06") }

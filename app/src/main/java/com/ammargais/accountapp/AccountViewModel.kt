@@ -99,6 +99,16 @@ class AccountViewModel(app: Application) : AndroidViewModel(app) {
         }
         message = "تم حفظ كشف CSV؛ يمكنك فتحه في Excel"
     }
+    fun exportXlsx(uri: Uri, accountId: String, currency: Currency?, from: String, to: String) = runTask {
+        val snapshot = ledger
+        withContext(Dispatchers.IO) {
+            val account = snapshot.accounts.first { it.id == accountId }
+            getApplication<Application>().contentResolver.openOutputStream(uri, "wt")?.use {
+                StatementXlsx.write(it, snapshot, account, currency, from, to)
+            } ?: error("تعذر حفظ ملف Excel")
+        }
+        message = "تم حفظ كشف Excel"
+    }
     fun exportPdf(uri: Uri?, accountId: String, currency: Currency?, from: String, to: String) = runTask {
         val snapshot = ledger; val app = getApplication<Application>()
         val account = snapshot.accounts.first { it.id == accountId }

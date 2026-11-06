@@ -59,7 +59,8 @@ object StatementPdf {
             activeCurrency?.let { line("${it.title} • ${it.name} • تابع", bold = true, color = green); header() }
         }
         start(); line("لنا: مستحق لصاحب الدفتر • علينا: مستحق لصاحب الحساب • كل عملة مستقلة.", 9f)
-        val currencies = currency?.let { listOf(it) } ?: Currency.entries.filter { c -> ledger.entries.any { e -> e.lines.any { it.accountId == account.id && it.currency == c } } }.ifEmpty { listOf(Currency.AED) }
+        Statement.convertedSummary(ledger, account, to)?.let { line(it, 10f, true, green) }
+        val currencies = currency?.let { listOf(it) } ?: ledger.currencies.filter { c -> ledger.entries.any { e -> e.lines.any { it.accountId == account.id && it.currency == c } } }
         currencies.forEach { c ->
             activeCurrency = null
             if (y + 120 > 780f) start()
